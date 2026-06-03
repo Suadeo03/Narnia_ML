@@ -29,21 +29,22 @@ You can run your trained model by running
 
 where
 
-- `holdout_data` (input; required) is a folder with the holdout data files, which will not necessarily include the labels;
+- `holdout_data` (input; required) is a folder with the held-out data files, which will not necessarily include the labels;
 - `model` (input; required) is a folder for loading your model; and
-- `holdout_outputs` (output; required) is a folder for saving your model outputs.
+- `holdout_outputs` (output; required) is a folder for saving your model outputs for the held-out data.
 
 The [Challenge website](https://physionetchallenges.org/2026/#data) provides a training database with a description of the contents and structure of the data files.
 
 You can evaluate your model by pulling or downloading the [evaluation code](https://github.com/physionetchallenges/evaluation-2026) and running
 
-    python evaluate_model.py -d <path_to_labels> -o <path_to_outputs> -s <path_to_scores>
+    python evaluate_model.py -d holdout_labels -o holdout_outputs -p prevalence_labels -s scores.csv
 
 where
 
-- `path_to_labels`(input; required) is the path to the csv file containing the labels for the holdout data files (e.g. demographics.csv);
-- `path_to_outputs` (input; required) is the path to the csv file with your model's outputs for the data (e.g. demographics.csv); and
-- `path_to_scores` (output; optional) is file with a collection of scores for your model (e.g., scores.txt).
+- `holdout_labels`(input; required) is the path to the CSV file with the labels for the held-out data;
+- `holdout_outputs` (input; required) is the path to the CSV file with your model's outputs for the held-out data;
+- `prevalence_labels` (input; required) is the path to the CSV file with labels and ages for the data; we will use the `demographics.csv` data for the full training set;
+- `scores.tsv` (output; optional) is file with a collection of scores for your model.
 
 You can use the provided training set for the `training_data` and `holdout_data` files, but we will use different datasets for the validation and test sets, and we will not provide the labels to your code.
 

@@ -13,6 +13,8 @@ import joblib
 import numpy as np
 import os
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
 import sys
 from tqdm import tqdm
 
@@ -27,7 +29,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Build the absolute path to the CSV file relative to the script location
 DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
-
 
 ################################################################################
 #
@@ -102,15 +103,15 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
             diagnosis_file = os.path.join(data_folder, DEMOGRAPHICS_FILE)
             label = load_diagnoses(diagnosis_file, patient_id)
 
-            # Store the features and labels, but
-            # the human annotations are not available on the hidden validation and test sets, but you
-            # may want to consider how to use them for training.
+            # Store the features and labels, but the human annotations are not available on the hidden validation and test sets.
             if label == 0 or label == 1:
                 features.append(np.hstack([demographic_features, physiological_features, algorithmic_features]))
                 labels.append(label)
 
-            if 'physiological_data' in locals(): del physiological_data
-            if 'algorithmic_annotations' in locals(): del algorithmic_annotations
+            if 'physiological_data' in locals():
+                del physiological_data
+            if 'algorithmic_annotations' in locals():
+                del algorithmic_annotations
 
         except Exception as e:
             # If an error occurs (e.g., a record is corrupted), log it and move to the next
@@ -132,10 +133,19 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     n_estimators = 12  # Number of trees in the forest.
     max_leaf_nodes = 34  # Maximum number of leaf nodes in each tree.
     random_state = 56  # Random state; set for reproducibility.
+    
+    # Created a Pipeline wrapping SimpleImputer and RandomForestClassifier.
+    # This automatically injects median values for any missing data (NaN) during both fit() and predict() calls.
+    rf = RandomForestClassifier(
+        n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state)
+        
+    model = Pipeline([
+        ('imputer', SimpleImputer(strategy='median')),
+        ('classifier', rf)
+    ])
 
     # Fit the model.
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, max_leaf_nodes=max_leaf_nodes, random_state=random_state).fit(features, labels)
+    model.fit(features, labels)
 
     # Create a folder for the model if it does not already exist.
     os.makedirs(model_folder, exist_ok=True)
@@ -170,28 +180,26 @@ def run_model(model, record, data_folder, verbose):
     patient_data = load_demographics(patient_data_file, patient_id, session_id)
     demographic_features = extract_demographic_features(patient_data)
 
-    # Load signal data.
+    # Load the signal data.
     phys_file = os.path.join(data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}.edf")
     if os.path.exists(phys_file):
         phys_data, phys_fs = load_signal_data(phys_file)
         # Ensure csv_path is accessible or defined
         physiological_features = extract_physiological_features(phys_data, phys_fs)
     else:
-        # Fallback to zeros if file is missing (length 49)
-        physiological_features = np.zeros(49)
+        physiological_features = np.full(49, float('nan')) # Fallback if signal data does not exist
 
-    # Load Algorithmic Annotations
+    # Load the algorithmic annotations.
     algo_file = os.path.join(data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER, site_id, f"{patient_id}_ses-{session_id}_caisr_annotations.edf")
     if os.path.exists(algo_file):
         algo_data, _ = load_signal_data(algo_file)
         algorithmic_features = extract_algorithmic_annotations_features(algo_data)
     else:
-        # Fallback to zeros (length 12)
-        algorithmic_features = np.zeros(12)
+        algorithmic_features = np.full(12, float('nan')) # Fallback if algorithmic annotations do not exist
 
     features = np.hstack([demographic_features, physiological_features, algorithmic_features]).reshape(1, -1)
 
-    # Get the model outputs.
+    # Apply the model to the features.
     binary_output = model.predict(features)[0]
     probability_output = model.predict_proba(features)[0][1]
 
@@ -217,13 +225,13 @@ def extract_demographic_features(data):
             - [4:9]: Race (One-hot: Asian, Black, Other, Unavailable, White)
             - [9]: BMI (Continuous)
     """
-    # 1. Age Feature (1 dimension)
-    # Convert 'Age' to a float; default to 0 if missing
-    age = np.array([load_age(data)])
+    # 1. Age
+    age = load_age(data)
+    age = np.array([age])
 
-    # 2. Sex One-Hot Encoding (3 dimensions: Female, Male, Other/Unknown)
+    # 2. Sex feature (one-hot encoding for Female, Male, Other/Unknown)
     # Uses lowercase prefix matching to handle variants like 'F', 'Female', 'M', or 'Male'
-    sex = load_sex(data)
+    sex = load_sex(data, standardize=True)
     sex_vec = np.zeros(3)
     if sex == 'Female': 
         sex_vec[0] = 1 # Index 0: Female
@@ -232,17 +240,27 @@ def extract_demographic_features(data):
     else: 
         sex_vec[2] = 1 # Index 2: Other/Unknown
 
-    # 3. Race One-Hot Encoding (6 dimensions)
-    # Standardizes the raw text into one of six categories using the helper function
-    race_category = get_standardized_race(data).lower()
+    # 3. Race One-Hot Encoding (5 dimensions)
+    # Standardizes the raw text into one of five categories using the helper function
+    race = load_race(data, standardize=True)
     race_vec = np.zeros(5)
     # Pre-defined mapping for index consistency
-    race_mapping = {'asian': 0, 'black': 1, 'others': 2, 'unavailable': 3, 'white': 4}
-    race_vec[race_mapping.get(race_category, 2)] = 1
+    if race == 'Asian':
+        race_vec[0] = 1
+    elif race == 'Black':
+        race_vec[1] = 1
+    elif race == 'Others':
+        race_vec[2] = 1
+    elif race == 'Unavailable':
+        race_vec[3] = 1
+    elif race == 'White':
+        race_vec[4] = 1
+    else:
+        race_vec[2] = 1 # Default to 'Others' for any unrecognized
 
-    # 4. Body Mass Index (BMI) Feature (1 dimension)
-    # Extracts the pre-calculated mean BMI; handles strings, NaNs, and missing keys
-    bmi = np.array([load_bmi(data)])
+    # 4. Body mass index (BMI)
+    bmi = load_bmi(data)
+    bmi = np.array([bmi])
 
     # 5. Concatenate all components into a single vector (1 + 3 + 5 + 1 = 10)
     
@@ -334,37 +352,6 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
                 fs = processed_fs.get(candidate)
                 break 
 
-        # if sig is not None and len(sig) > 0 and fs is not None:
-        #     # --- 1. Time Domain Features ---
-        #     std_val = np.std(sig)
-        #     mav_val = np.mean(np.abs(sig))
-        #     energy_val = np.sum(sig**2) / len(sig)
-            
-        #     # --- 2. Frequency Domain Features (Spectral) ---
-        #     n = len(sig)
-        #     # Correct spacing for frequency axis based on channel-specific fs
-        #     freqs = np.fft.rfftfreq(n, d=1/fs)
-            
-        #     # Compute Power Spectral Density (PSD)
-        #     # Multiplied by 2 for rfft (except DC/Nyquist) and divided by fs for density
-        #     fft_res = np.abs(np.fft.rfft(sig))
-        #     psd = (fft_res**2) / (n * fs)
-            
-        #     # Define band masks
-        #     delta_mask = (freqs >= 0.5) & (freqs <= 4)
-        #     theta_mask = (freqs > 4) & (freqs <= 8)
-        #     alpha_mask = (freqs > 8) & (freqs <= 12)
-            
-        #     # Calculate power in bands using trapezoidal integration for physical accuracy
-        #     delta_p = np.trapezoid(psd[delta_mask], freqs[delta_mask]) if np.any(delta_mask) else 0.0
-        #     theta_p = np.trapezoid(psd[theta_mask], freqs[theta_mask]) if np.any(theta_mask) else 0.0
-        #     alpha_p = np.trapezoid(psd[alpha_mask], freqs[alpha_mask]) if np.any(alpha_mask) else 0.0
-            
-        #     # Ratio biomarker: Delta/Theta (Indicator of cognitive slowing)
-        #     dt_ratio = delta_p / theta_p if theta_p > 0 else 0.0
-
-        #     final_features.extend([std_val, mav_val, energy_val, delta_p, theta_p, alpha_p, dt_ratio])
-
         if sig is not None and len(sig) > 1:
             # --- Time Domain Features (Very Fast) ---
             std_val = np.std(sig)
@@ -394,7 +381,7 @@ def extract_physiological_features(physiological_data, physiological_fs, csv_pat
 
         else:
             # Padding: 7 features per lead type
-            final_features.extend([0.0] * 7)
+            final_features.extend([float('nan')] * 7)
 
     if 'processed_channels' in locals(): del processed_channels
 
@@ -406,7 +393,7 @@ def extract_algorithmic_annotations_features(algo_data):
     Output vector length: 12
     """
     if not algo_data:
-        return np.zeros(12)
+        return np.full(12, float('nan'))
 
     features = []
 
@@ -417,7 +404,7 @@ def extract_algorithmic_annotations_features(algo_data):
     
     def count_discrete_events(key):
         if key not in algo_data or total_hours <= 0:
-            return 0.0
+            return float('nan')
         
         sig = algo_data[key].astype(float)
         # Create a binary mask: 1 if there is an event, 0 if not
@@ -454,19 +441,19 @@ def extract_algorithmic_annotations_features(algo_data):
         # Sleep Efficiency: (N1+N2+N3+R) / Total
         efficiency = np.mean((valid_stages >= 1) & (valid_stages <= 4))
     else:
-        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = 0.0
+        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = float('nan')
 
     features.extend([w_pct, n1_pct, n2_pct, n3_pct, r_pct, efficiency])
 
     # --- 3. Model Confidence / Uncertainty ---
     # Mean probability of Wake and REM (indicators of sleep stability)
     # We use the raw probability traces
-    prob_w = np.mean(algo_data.get('caisr_prob_w', [0]))
-    prob_n3 = np.mean(algo_data.get('caisr_prob_n3', [0]))
-    prob_arous = np.mean(algo_data.get('caisr_prob_arous', [0]))
+    prob_w = np.mean(algo_data.get('caisr_prob_w', [float('nan')]))
+    prob_n3 = np.mean(algo_data.get('caisr_prob_n3', [float('nan')]))
+    prob_arous = np.mean(algo_data.get('caisr_prob_arous', [float('nan')]))
     
-    # Standardize '9.0' or other filler values to 0
-    clean_prob = lambda x: x if x < 1.0 else 0.0
+    # Standardize '9.0' or other filler values to NaN
+    clean_prob = lambda x: x if x < 1.0 else float('nan')
     features.extend([clean_prob(prob_w), clean_prob(prob_n3), clean_prob(prob_arous)])
 
     return np.array(features)
@@ -478,7 +465,7 @@ def extract_human_annotations_features(human_data):
     """
     # If data is missing (common in hidden test sets), return a zero vector
     if not human_data or 'resp_expert' not in human_data:
-        return np.zeros(12)
+        return np.full(12, float('nan'))
 
     features = []
 
@@ -489,7 +476,7 @@ def extract_human_annotations_features(human_data):
     
     def count_discrete_events(key):
         if key not in human_data or total_hours <= 0:
-            return 0.0
+            return float('nan')
         sig = (human_data[key] > 0).astype(int)
         # Identify the start of each continuous event block
         diff = np.diff(sig, prepend=0)
@@ -517,7 +504,7 @@ def extract_human_annotations_features(human_data):
         n3_pct = np.mean(valid_stages == 1)
         efficiency = np.mean(valid_stages > 0)
     else:
-        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = 0.0
+        w_pct = n1_pct = n2_pct = n3_pct = r_pct = efficiency = float('nan')
 
     features.extend([w_pct, n1_pct, n2_pct, n3_pct, r_pct, efficiency])
 
@@ -530,9 +517,9 @@ def extract_human_annotations_features(human_data):
         waso_minutes = (np.count_nonzero(valid_stages == 0) * 30) / 60.0
         # REM Latency (epochs until first REM)
         rem_indices = np.where(valid_stages == 4)[0]
-        rem_latency = rem_indices[0] if len(rem_indices) > 0 else 0.0
+        rem_latency = rem_indices[0] if len(rem_indices) > 0 else float('nan')
     else:
-        transitions = waso_minutes = rem_latency = 0.0
+        transitions = waso_minutes = rem_latency = float('nan')
 
     features.extend([transitions, waso_minutes, rem_latency])
 
