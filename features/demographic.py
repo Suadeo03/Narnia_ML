@@ -3,6 +3,15 @@
 #
 # Iteration history:
 #   v1 (2026-06-30): Initial — age, sex onehot, race onehot, BMI (10 features)
+#   v1.1 (2026-07-01): Docstring corrections only, no logic change —
+#     - Age is NOT capped at 90. helper_code.py's load_age() returns a raw
+#       float(age) with NaN fallback; no clipping happens anywhere in the
+#       pipeline. The prior docstring was aspirational/stale, not a bug in
+#       behavior, but it matters: loso_cv.py's compute_prevalence() keys on
+#       exact age values, and a phantom cap would have implied a mismatch
+#       between the age used as a model feature and the age used for reward/
+#       prevalence lookups that doesn't actually exist.
+#     - BMI NaN rate corrected: Phase 1 EDA found 75.9% missing, not ~15%.
 
 import numpy as np
 from helper_code import load_age, load_sex, load_bmi, load_race
@@ -13,10 +22,10 @@ def extract_demographic_features(data):
     Extracts and encodes demographic features from a metadata dictionary.
 
     Returns np.ndarray of length 10:
-        [0]   Age (continuous, capped at 90)
+        [0]   Age (continuous — not capped; NaN if missing/unparseable)
         [1-3] Sex one-hot  (Female, Male, Unknown)
         [4-8] Race one-hot (Asian, Black, Others, Unavailable, White)
-        [9]   BMI (continuous — NaN for ~15% of patients, imputed downstream)
+        [9]   BMI (continuous — 75.9% NaN per Phase 1 EDA, imputed downstream)
     """
     age = np.array([load_age(data)])
 

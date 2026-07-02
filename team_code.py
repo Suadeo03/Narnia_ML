@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 
 # Team Narnia — PhysioNet Challenge 2026
-# Entry 2: Dropped site-confounded absolute Hjorth features.
-#           Replaced with within-recording ratio features (site-stable).
-#           Tighter XGBoost regularization.
-#           Fixed N3 gradient + redesigned spontaneous arousal.
+# Entry 3: Added Platt-scaled calibration (CalibratedClassifierCV) and
+#          explicit threshold (0.12, tuned via loso_cv.py pooled sweep)
+#          replacing model.predict()'s default 0.5 cutoff.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -18,6 +17,7 @@ import os
 from xgboost import XGBClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
+from sklearn.calibration import CalibratedClassifierCV
 from tqdm import tqdm
 
 from helper_code import *
@@ -43,6 +43,15 @@ DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
 _N_BASE     = N_CAISR_BASE_FEATURES      # 12
 _N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
 _N_RATIO    = N_RATIO_FEATURES           # 15
+
+# Entry 3 — calibration + threshold.
+# PLACEHOLDER — replace with the value loso_cv.py's loso_threshold_sweep.csv
+# recommends (maximizes reward without costing >~0.02 AUROC vs the AUROC-
+# optimal threshold). Do NOT submit with 0.10 unverified — run the sweep
+# first. Local prevalence is ~7.6% in the small training set; 0.5 (the old
+# default) is far too conservative for the reward metric.
+#verified THRESHOLD
+THRESHOLD = 0.12
 
 ################################################################################
 # Required functions
@@ -153,31 +162,35 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── XGBoost — tighter regularization than entry 1 ────────────────────────
-    # Entry 1 used depth=4, subsample=0.8, colsample=0.8, no explicit L1/L2.
-    # LOSO showed overfitting to within-site patterns → increase regularization.
+    # ── XGBoost + Entry 3 calibration ─────────────────────────────────────────
+    # Entry 2 tightened regularization vs entry 1 (depth 4→3, added L1/L2).
+    # Entry 3 wraps the same XGBoost config in Platt-scaled (sigmoid)
+    # calibration. method='sigmoid' over 'isotonic': isotonic needs more
+    # positives than the ~84 in the small training set to avoid overfitting
+    # the calibration curve itself — revisit at the large training set.
     n_pos = int(labels.sum())
     n_neg = int((~labels).sum())
     scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
 
-    xgb = XGBClassifier(
+    xgb_raw = XGBClassifier(
         n_estimators     = 300,
-        max_depth        = 3,       # reduced: 4 → 3
+        max_depth        = 3,
         learning_rate    = 0.05,
-        subsample        = 0.7,     # reduced: 0.8 → 0.7
-        colsample_bytree = 0.6,     # reduced: 0.8 → 0.6
-        reg_alpha        = 0.1,     # new: L1 regularization
-        reg_lambda       = 2.0,     # new: L2 regularization (default was 1.0)
-        min_child_weight = 5,       # new: minimum samples per leaf
+        subsample        = 0.7,
+        colsample_bytree = 0.6,
+        reg_alpha        = 0.1,
+        reg_lambda       = 2.0,
+        min_child_weight = 5,
         scale_pos_weight = scale_pos_weight,
         random_state     = 42,
         eval_metric      = 'auc',
         verbosity        = 0,
     )
+    calibrated_xgb = CalibratedClassifierCV(xgb_raw, method='sigmoid', cv=5)
 
     model = Pipeline([
         ('imputer',    SimpleImputer(strategy='median')),
-        ('classifier', xgb),
+        ('classifier', calibrated_xgb),
     ])
     model.fit(features, labels)
 
@@ -238,8 +251,14 @@ def run_model(model, record, data_folder, verbose):
         ratio_f,
     ]).reshape(1, -1)
 
-    binary_output      = model.predict(features)[0]
+    # ── Entry 3: calibrated probability + explicit threshold ──────────────────
+    # model.predict_proba() is already calibrated — calibration is baked into
+    # the pipeline itself (see train_model()). model.predict() is NOT used
+    # here: its default 0.5 cutoff is far too conservative at ~7.6% local
+    # prevalence, which is why entry 1/2 reward was 0.011 despite reasonable
+    # AUROC. THRESHOLD is set from loso_cv.py's pooled threshold sweep.
     probability_output = model.predict_proba(features)[0][1]
+    binary_output       = int(probability_output > THRESHOLD)
 
     return binary_output, probability_output
 
