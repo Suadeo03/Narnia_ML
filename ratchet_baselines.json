@@ -1,0 +1,32 @@
+{
+  "_readme": "Hand-curated ratchet baselines. Do NOT let a script auto-overwrite these — same discipline as learning_log.md's decision log. Only promote a new run to a baseline here after you've deliberately decided to trust it (e.g. after a regression check + a decision-log entry), not automatically after every loso_cv.py run. n_pos/n_neg are POOLED across LOSO test folds (I0006 + S0001; I0002 is never a holdout, see learning_log.md 2026-07-01) and are required to compute the Hanley-McNeil comparison SE.",
+
+  "small_entry3": {
+    "description": "Entry 3 config: 48 features, XGBoost (depth=3, reg_alpha=0.1, reg_lambda=2.0, min_child_weight=5), CalibratedClassifierCV(sigmoid, cv=5), THRESHOLD=0.12. Small training set (1,103 patients).",
+    "scale": "small",
+    "model_family": "xgboost",
+    "feature_count": 48,
+    "age_cond_auroc": 0.5399,
+    "n_pos": 76,
+    "n_neg": 973,
+    "reward": 0.1148,
+    "reward_threshold": 0.12,
+    "date_confirmed": "2026-07-01",
+    "source": "learning_log.md, 2026-07-01 (later still) — Entry 3 LOSO results"
+  },
+
+  "large_logreg": {
+    "description": "PLACEHOLDER — fill in exact pooled n_pos/n_neg from loso_results.csv before using this as a gate. Logistic regression, large training set, cv5 calibration, age-residual features on. First result to clear the ~0.57-0.58 noise floor.",
+    "scale": "large",
+    "model_family": "logreg",
+    "feature_count": 50,
+    "age_cond_auroc": 0.6002,
+    "n_pos": null,
+    "n_neg": null,
+    "reward": 0.0719,
+    "reward_threshold": 0.10,
+    "date_confirmed": "2026-07-07",
+    "source": "learning_log.md, 2026-07-07 — Calibrated logistic regression entry",
+    "status": "NOT USABLE AS A GATE UNTIL n_pos/n_neg ARE FILLED IN"
+  }
+}

@@ -25,11 +25,22 @@ Also does two cheap sanity checks while it's at it:
   - Cross-checks that third-party packages actually imported by
     team_code.py / features/*.py are listed in requirements.txt.
 
+Optionally also runs the ratchet check (see ratchet_check.py): compares a
+fresh loso_cv.py result against a hand-curated "best confirmed so far"
+baseline (ratchet_baselines.json), using Hanley-McNeil SE so a noisy dip
+doesn't get mistaken for a real regression. Only runs if --loso-results is
+passed — if omitted, this is a visible WARNING, not a silent skip, since
+submitting without checking against the ratchet is exactly the gap this
+was built to close.
+
 Usage:
     python check_submission_files.py [--repo-root .]
+    python check_submission_files.py --loso-results loso_results.csv \\
+        --ratchet-baseline small_entry3 [--candidate-reward 0.11]
 
-Exit code: 0 if everything required is present, 1 otherwise (so this can
-gate a pre-commit hook or a submission checklist script if you want).
+Exit code: 0 if everything required is present AND (if run) the ratchet
+check passes, 1 otherwise (so this can gate a pre-commit hook or a
+submission checklist script if you want).
 """
 
 import argparse
@@ -38,6 +49,8 @@ import os
 import re
 import sys
 from pathlib import Path
+
+from ratchet_check import check_ratchet, _print_report
 
 # Files the Challenge harness needs regardless of team_code.py's contents.
 # These are the "do not edit" files from CLAUDE.md plus build/config files.
@@ -149,7 +162,9 @@ def check_requirements_coverage(repo_root: Path, packages: set):
     return missing
 
 
-def run(repo_root: str):
+def run(repo_root: str, loso_results: str = None, ratchet_baseline: str = None,
+        baselines_file: str = "ratchet_baselines.json", candidate_reward: float = None,
+        sigma_threshold: float = 1.0):
     root = Path(repo_root).resolve()
     print(f"Checking submission files in: {root}\n")
 
@@ -210,6 +225,29 @@ def run(repo_root: str):
         else:
             print("All imported packages found in requirements.txt — clean.")
 
+    # ── Ratchet check (optional — see ratchet_check.py) ──────────────────────
+    if loso_results:
+        print(f"\nRatchet check ({loso_results} vs baseline '{ratchet_baseline}'):\n")
+        try:
+            passed, results, messages = check_ratchet(
+                loso_results, ratchet_baseline, baselines_file,
+                candidate_reward=candidate_reward, sigma_threshold=sigma_threshold,
+            )
+            _print_report(ratchet_baseline, results, messages)
+            if not passed:
+                problems.append(
+                    f"Ratchet check FAILED against baseline '{ratchet_baseline}' "
+                    f"— see report above.")
+        except (FileNotFoundError, KeyError, ValueError) as e:
+            print(f"!! RATCHET CHECK ERROR: {e}")
+            problems.append(f"Ratchet check could not run: {e}")
+    else:
+        print("\n!! WARNING: no --loso-results passed — ratchet check SKIPPED.")
+        print("   This submission has not been checked against the best confirmed")
+        print("   LOSO baseline. Run with --loso-results and --ratchet-baseline")
+        print("   before submitting, or confirm you're deliberately skipping this.")
+        warnings.append("Ratchet check skipped — no --loso-results provided.")
+
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
     if not problems:
@@ -230,7 +268,27 @@ def run(repo_root: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=".", help="Path to the repo root (default: current directory)")
+    parser.add_argument("--loso-results", default=None,
+                         help="Path to loso_cv.py's per-fold results CSV. If provided, runs the "
+                              "ratchet check (see ratchet_check.py) against --ratchet-baseline.")
+    parser.add_argument("--ratchet-baseline", default=None,
+                         help="Key into ratchet_baselines.json (e.g. small_entry3). "
+                              "Required if --loso-results is passed.")
+    parser.add_argument("--baselines-file", default="ratchet_baselines.json")
+    parser.add_argument("--candidate-reward", type=float, default=None,
+                         help="Pooled reward at your chosen threshold, if you have one. Optional — "
+                              "without it, only the AUROC ratchet is checked.")
+    parser.add_argument("--sigma-threshold", type=float, default=1.0,
+                         help="AUROC regression must exceed this many pooled Hanley-McNeil SEs "
+                              "to fail the ratchet. Default 1.0.")
     args = parser.parse_args()
 
-    success = run(args.repo_root)
+    if args.loso_results and not args.ratchet_baseline:
+        parser.error("--ratchet-baseline is required when --loso-results is passed.")
+
+    success = run(args.repo_root, loso_results=args.loso_results,
+                  ratchet_baseline=args.ratchet_baseline,
+                  baselines_file=args.baselines_file,
+                  candidate_reward=args.candidate_reward,
+                  sigma_threshold=args.sigma_threshold)
     sys.exit(0 if success else 1)

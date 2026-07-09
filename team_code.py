@@ -4,6 +4,20 @@
 # Entry 3: Added Platt-scaled calibration (CalibratedClassifierCV) and
 #          explicit threshold (0.12, tuned via loso_cv.py pooled sweep)
 #          replacing model.predict()'s default 0.5 cutoff.
+# Entry 4: Added AgeResidualizer pipeline step (2 new features:
+#          CA_rate_age_residual, EEG_var_REM_Wake_age_residual). Both were
+#          previously written off as uninformative but age-residualized EDA
+#          (2026-07-02) showed real signal masked by an age confound. Fit at
+#          train time only, applied identically at inference — see
+#          features/age_residuals.py. Feature count: 48 -> 50.
+# Entry 4 (fix, 2026-07-03): moved model-pipeline construction (XGBoost
+#          params, calibration, AgeResidualizer wiring) out of this file and
+#          into features/pipeline.py's build_pipeline(), shared with
+#          loso_cv.py. This closes a real bug where loso_cv.py had its own
+#          hand-copied Pipeline() that silently never got the AgeResidualizer
+#          step added here — LOSO was validating a stale 48-feature model
+#          while this file had already moved to 50. See features/pipeline.py
+#          for the full incident writeup.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -14,10 +28,6 @@
 import joblib
 import numpy as np
 import os
-from xgboost import XGBClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.calibration import CalibratedClassifierCV
 from tqdm import tqdm
 
 from helper_code import *
@@ -29,6 +39,7 @@ from features.caisr_enriched     import extract_caisr_enriched_features
 from features.physiological_ratios import (extract_physiological_ratio_features,
                                             N_RATIO_FEATURES)
 from features.human              import extract_human_annotations_features
+from features.pipeline           import build_pipeline
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
                       N_DEMOGRAPHIC_FEATURES)
 
@@ -134,6 +145,9 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
                 os.path.join(data_folder, DEMOGRAPHICS_FILE), patient_id)
 
             if label == 0 or label == 1:
+                # 48-feature extraction vector. AgeResidualizer (pipeline
+                # step, Entry 4) appends the 2 age-residualized features
+                # at model.fit() time — do not hstack them here.
                 features.append(np.hstack([
                     demo_f,
                     caisr_base,
@@ -162,36 +176,13 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── XGBoost + Entry 3 calibration ─────────────────────────────────────────
-    # Entry 2 tightened regularization vs entry 1 (depth 4→3, added L1/L2).
-    # Entry 3 wraps the same XGBoost config in Platt-scaled (sigmoid)
-    # calibration. method='sigmoid' over 'isotonic': isotonic needs more
-    # positives than the ~84 in the small training set to avoid overfitting
-    # the calibration curve itself — revisit at the large training set.
-    n_pos = int(labels.sum())
-    n_neg = int((~labels).sum())
-    scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
-
-    xgb_raw = XGBClassifier(
-        n_estimators     = 300,
-        max_depth        = 3,
-        learning_rate    = 0.05,
-        subsample        = 0.7,
-        colsample_bytree = 0.6,
-        reg_alpha        = 0.1,
-        reg_lambda       = 2.0,
-        min_child_weight = 5,
-        scale_pos_weight = scale_pos_weight,
-        random_state     = 42,
-        eval_metric      = 'auc',
-        verbosity        = 0,
-    )
-    calibrated_xgb = CalibratedClassifierCV(xgb_raw, method='sigmoid', cv=5)
-
-    model = Pipeline([
-        ('imputer',    SimpleImputer(strategy='median')),
-        ('classifier', calibrated_xgb),
-    ])
+    # ── Model pipeline (Entry 2 XGBoost config + Entry 3 calibration +
+    #    Entry 4 AgeResidualizer) ───────────────────────────────────────────────
+    # Built via features/pipeline.py's build_pipeline() — the single shared
+    # definition also used by loso_cv.py, so the validation harness and this
+    # submission can never silently diverge on what "the model" is again
+    # (see features/pipeline.py header for the incident that motivated this).
+    model = build_pipeline(labels, calibrated=True)
     model.fit(features, labels)
 
     os.makedirs(model_folder, exist_ok=True)
@@ -244,6 +235,10 @@ def run_model(model, record, data_folder, verbose):
         caisr_enriched = np.full(_N_ENRICHED, float('nan'))
         ratio_f        = np.full(_N_RATIO,    float('nan'))
 
+    # NOTE: this is the 48-feature extraction vector (demo/base/enriched/
+    # ratios). The loaded `model` pipeline's age_residual step appends the
+    # 2 Entry 4 age-residualized features automatically — do not hstack
+    # them here, and do not hardcode 50 anywhere in this function.
     features = np.hstack([
         demo_f,
         caisr_base,
