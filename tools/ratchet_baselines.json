@@ -1,6 +1,27 @@
 {
   "_readme": "Hand-curated ratchet baselines. Do NOT let a script auto-overwrite these — same discipline as learning_log.md's decision log. Only promote a new run to a baseline here after you've deliberately decided to trust it, not automatically after every loso_cv.py run. Schema (2026-07-08, corrected): 'folds' is a list of per-holdout-site {site, age_cond_auroc, n_pos, n_neg}. age_cond_auroc/reward at the top level are DERIVED (simple mean across folds) and shown for convenience/display only — the ratchet check recomputes from 'folds' directly, matching loso_cv.py's own 'Mean age-conditioned AUROC' convention (a plain average across folds, NOT weighted by fold size). This was corrected 2026-07-08 after a size-weighted version gave a materially different, wrong number (0.5411 vs the confirmed-correct 0.5443) on a real CatBoost run.\n\n'leaderboard_confirmed' (added 2026-07-08): whether THIS baseline's config has ever actually been submitted to the real Challenge leaderboard, as opposed to only evaluated locally via LOSO. This matters because the LOSO->leaderboard offset has already been shown to be unstable at small scale (Entry 1: LOSO 0.499 -> leaderboard 0.624, delta +0.125; Entry 2: LOSO 0.540 -> leaderboard 0.616, delta +0.076 — different sign of surprise each time, offset retired as a predictor 2026-07-02) and there is currently ZERO leaderboard data point at large scale — no large-set config has been submitted yet. A ratchet PASS against a leaderboard_confirmed=false baseline means 'at least as good as our best LOSO estimate so far', which is a materially weaker claim than 'at least as good as something we know performs on the real leaderboard.' See ratchet_check.py's printed CAUTION for how this is surfaced.",
 
+  "entry8": {
+    "description": "Entry 8 config as ACTUALLY SHIPPED: logreg, C=0.001, l2, CalibratedClassifierCV(sigmoid, cv=5), AgeResidualizer on, value-weighted sample weighting (alpha=1.0), STAGE1_DROP_FEATURES applied (39 features), THRESHOLD=0.10. Large training set, 3-site LOSO rotation. This is the correct baseline for any Entry 9+ ratchet check — entry5_3site predates Stage 1 pruning and sample weighting and is not the current live config.",
+    "scale": "large",
+    "model_family": "logreg",
+    "feature_count": 39,
+    "folds": [
+      {"site": "I0006", "age_cond_auroc": 0.6750, "n_pos": 112, "n_neg": 1030},
+      {"site": "S0001", "age_cond_auroc": 0.6119, "n_pos": 334, "n_neg": 4805},
+      {"site": "I0002", "age_cond_auroc": 0.7264, "n_pos": 52, "n_neg": 267}
+    ],
+    "age_cond_auroc": 0.6711,
+    "reward": 0.1434,
+    "reward_threshold": 0.10,
+    "date_confirmed": "2026-07-20",
+    "source": "tools/ablation_drop_signflip_features.py Stage 1 validation, reproduced bit-for-bit across an independent Kaggle kernel restart; re-confirmed 2026-07-21 via tools/ablation_stage2_plus_limb.py's 'live' arm re-run against the post-limb-enrichment 51-column cache (identical LOSO folds, confirming the cache/code change didn't alter Entry 8's own behavior).",
+    "leaderboard_confirmed": true,
+    "leaderboard_auroc": 0.651,
+    "leaderboard_reward": 0.115,
+    "leaderboard_note": "Entry 8 WAS submitted (2026-07-20): reward 0.100 -> 0.115 (+15%, exceeds even Entry 5's 0.101), age-conditioned AUROC 0.646 -> 0.651 (+0.005 real, but LOSO's own +0.0252 prediction overestimated this specific gain by roughly 5x). First entry where LOSO's predicted DIRECTION held up on genuinely unseen validation sites (Entry 6 is the counterexample). Treat LOSO magnitude as unreliable in EITHER direction, direction only."
+  },
+
   "small_entry3": {
     "description": "Entry 3 config: 48 features, XGBoost (depth=3, reg_alpha=0.1, reg_lambda=2.0, min_child_weight=5), CalibratedClassifierCV(sigmoid, cv=5), THRESHOLD=0.12. Small training set (1,103 patients).",
     "scale": "small",

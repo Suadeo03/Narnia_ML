@@ -45,6 +45,34 @@ STAGE1_DROP_FEATURES = [
     'CA_rate', 'CA_total_ratio', 'EEG_zcr_REM_Wake',
 ]
 
+# Entry 9 (2026-07-21): Stage 2 + dead-feature cleanup, promoted from the
+# Kaggle-side tools/ (ablation_final_config.py, coefficient_analysis_
+# stage2.py) into this shared module — same drift this project has hit
+# before (see sample_weighting.py / AgeResidualizer's own promotion
+# history). Validated: +0.23 sigma on S0001 vs. Entry 8 alone (real,
+# sub-gate), +0.39 sigma combined with limb enrichment (tools/
+# ablation_stage2_plus_limb.py, 2026-07-21) — neither individually nor
+# combined clears the 1.0-sigma RESEARCH bar, but ratchet_check.py's
+# actual submission gate is a one-directional regression ratchet, not an
+# improvement-magnitude requirement: any real improvement passes it. See
+# ratchet_baselines.json's 'entry8' baseline for the comparison this was
+# validated against.
+STAGE2_DROP_FEATURES = ['CA_rate_age_residual', 'Race_Black', 'Race_White', 'Race_Asian']
+
+# Constant-zero across the entire ~6,600-patient training population at
+# every site (Race_Other: 0 patients; Sex_Unk: 0 patients) — harmless
+# either way, pure dead weight. Not a sign-flip issue, a zero-variance one.
+DEAD_FEATURES = ['Race_Other', 'Sex_Unk']
+
+# Entry 9's actual shipped drop list: Stage 1 (sign-flip) + Stage 2
+# (Race_*/CA_rate_age_residual sign-flip) + dead-feature cleanup, applied
+# together as ONE validated candidate (tools/ablation_stage2_plus_limb.py),
+# not three separate ad hoc changes stacked without re-testing the
+# combination.
+STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES = (
+    STAGE1_DROP_FEATURES + STAGE2_DROP_FEATURES + DEAD_FEATURES
+)
+
 
 class FeatureDropper(BaseEstimator, TransformerMixin):
     """

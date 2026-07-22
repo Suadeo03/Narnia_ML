@@ -97,15 +97,45 @@
 #          threshold for the new probability distribution, don't carry
 #          the old value over" discipline as every prior threshold change.
 #          Stage 2 of that same ablation (also dropping CA_rate_age_
-#          residual and Race_Black/White/Asian) scored higher still and
-#          clears the pre-committed 1.0-sigma gate outright — deliberately
-#          NOT included here. CA_rate_age_residual carries its own Entry 4
-#          validation history; the Race_* features carry real, documented
-#          demographic signal that coefficient instability alone doesn't
-#          invalidate. Both deserve separate, specific justification
-#          before being dropped — not bundled in just because Stage 1
-#          worked. See features/feature_selection.py header and
-#          learning_log.md, 2026-07-20, for the full reasoning.
+#          residual and Race_Black/White/Asian) was tested and found to be
+#          a REAL but SUB-GATE improvement (+0.23 sigma on S0001 vs. live
+#          Entry 8, re-tested correctly against the actual shipped
+#          config — an earlier note here claimed it "cleared the gate
+#          outright," which was based on a stale, superseded baseline
+#          comparison and has been corrected) — deliberately NOT included
+#          here at Entry 8 time. CA_rate_age_residual carries its own
+#          Entry 4 validation history; the Race_* features carry real,
+#          documented demographic signal that coefficient instability
+#          alone doesn't invalidate. Both deserve separate, specific
+#          justification before being dropped — not bundled in just
+#          because Stage 1 worked. See features/feature_selection.py
+#          header and learning_log.md, 2026-07-20, for the full reasoning.
+# Entry 9 (2026-07-21): Stage 2 + dead-feature cleanup (Race_Other,
+#          Sex_Unk — constant zero across the entire training population)
+#          PLUS a new stage-conditional limb-movement enrichment
+#          (Limb_REM, Limb_NREM, Limb_REM_NREM_ratio — features/
+#          caisr_enriched.py, same pattern already proven for AHI in v1),
+#          tested TOGETHER as one combined candidate (tools/
+#          ablation_stage2_plus_limb.py), not stacked ad hoc. Neither
+#          change alone clears the 1.0-sigma research bar (Stage 2 alone:
+#          +0.23 sigma; limb alone: +0.19 sigma), and combined they still
+#          don't (+0.39 sigma) — but the combination is a real, if modest,
+#          improvement on BOTH metrics vs. Entry 8 (mean age-cond AUROC
+#          +0.0085, S0001 fold +0.0092, best reward +13.0% relative), and
+#          roughly additive (0.23+0.19=0.42 naive sum vs. 0.39 actual — no
+#          meaningful interaction between the two changes). The 1.0-sigma
+#          bar is a RESEARCH discipline for deciding whether to keep
+#          investing in a candidate, not the submission gate itself —
+#          ratchet_check.py's actual gate is a one-directional regression
+#          ratchet (only fails on getting WORSE beyond noise; any real
+#          improvement passes cleanly) — see ratchet_baselines.json's
+#          'entry8' baseline entry. All three new limb features and all
+#          four Stage-2-affected features were re-checked for cross-fold
+#          coefficient sign-consistency on this exact 36-feature combined
+#          config (not just in isolation) — all sign-consistent.
+#          THRESHOLD changed 0.10 -> 0.06 to match this config's own
+#          pooled reward-sweep optimum — same "don't carry the old value
+#          over" discipline as every prior threshold change.
 #
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
@@ -129,7 +159,8 @@ from features.physiological_ratios import (extract_physiological_ratio_features,
 from features.human              import extract_human_annotations_features
 from features.pipeline           import build_logreg_pipeline
 from features.sample_weighting   import compute_value_weighted_sample_weights
-from features.feature_selection  import FeatureDropper, STAGE1_DROP_FEATURES
+from features.feature_selection  import (FeatureDropper,
+                                          STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES)
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
                       N_DEMOGRAPHIC_FEATURES, IDX_AGE)
 
@@ -154,7 +185,7 @@ _N_RATIO    = N_RATIO_FEATURES           # 15
 # t=0.08, because dropping features reshapes the calibrated output, not
 # just the ranking. See learning_log.md, 2026-07-20.
 #verified THRESHOLD
-THRESHOLD = 0.10
+THRESHOLD = 0.06
 
 # Entry 6 — value-weighted sample-weighting boost applied at .fit() time
 # (compute_value_weighted_sample_weights, features/sample_weighting.py).
@@ -274,9 +305,10 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── Model pipeline (Entry 8: logreg, C=0.001, value-weighted sample
-    #    weighting at alpha=1.0, calibrated, AgeResidualizer on, Stage 1
-    #    sign-flip features dropped) ───────────────────────────────────────
+    # ── Model pipeline (Entry 9: logreg, C=0.001, value-weighted sample
+    #    weighting at alpha=1.0, calibrated, AgeResidualizer on, Stage 1 +
+    #    Stage 2 + dead-feature cleanup drops, limb enrichment features
+    #    kept) ──────────────────────────────────────────────────────────
     # Built via features/pipeline.py's build_logreg_pipeline() — the same
     # shared definition loso_cv.py/reg_sweep.py uses, so the validation
     # harness and this submission can never silently diverge on what "the
@@ -289,13 +321,13 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     # FeatureDropper (features/feature_selection.py) is inserted
     # immediately after 'age_residual' and before 'imputer' — it MUST sit
     # there, not earlier, so AgeResidualizer's own source features (e.g.
-    # CA_rate, used to compute CA_rate_age_residual, which is KEPT here)
-    # are still present when AgeResidualizer runs, even though the raw
-    # CA_rate column itself is one of the 11 dropped. Do not reorder these
-    # steps.
+    # CA_rate, used to compute CA_rate_age_residual — which IS dropped as
+    # of Entry 9, see feature_selection.py's Stage 2 rationale) are still
+    # present when AgeResidualizer runs. Do not reorder these steps.
     _base_model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
     model = Pipeline(
-        [_base_model.steps[0], ('feature_dropper', FeatureDropper(STAGE1_DROP_FEATURES))]
+        [_base_model.steps[0],
+         ('feature_dropper', FeatureDropper(STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES))]
         + _base_model.steps[1:]
     )
 
