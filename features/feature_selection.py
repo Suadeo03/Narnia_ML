@@ -73,6 +73,24 @@ STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES = (
     STAGE1_DROP_FEATURES + STAGE2_DROP_FEATURES + DEAD_FEATURES
 )
 
+# Features added by the 2026-07-20 limb enrichment (features/
+# caisr_enriched.py) -- did NOT exist when Entry 8 shipped or when
+# STAGE1_DROP_FEATURES was derived. Reproducing the EXACT Entry 8 config
+# now that the raw vector is permanently 51 columns (not 48) requires
+# excluding these explicitly -- STAGE1_DROP_FEATURES alone is no longer
+# sufficient to get back to 39 features, it now yields 42 (51+2-11) since
+# it has no way to know about columns that didn't exist when it was
+# written. This is exactly the kind of silent drift this project has hit
+# before with hardcoded index ranges (see tools/loso_cv.py's GROUPS dict
+# incident) -- caught here via a pipeline smoke test before being shipped
+# as a "revert," not assumed safe.
+NEW_LIMB_FEATURES = ['Limb_REM', 'Limb_NREM', 'Limb_REM_NREM_ratio']
+
+# The EXACT Entry 8 config, reproducible regardless of what's been added
+# to caisr_enriched.py since -- use this (not STAGE1_DROP_FEATURES alone)
+# whenever the goal is specifically "reproduce Entry 8," e.g. a revert.
+ENTRY8_EXACT_DROP_FEATURES = STAGE1_DROP_FEATURES + NEW_LIMB_FEATURES
+
 
 class FeatureDropper(BaseEstimator, TransformerMixin):
     """

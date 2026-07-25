@@ -137,6 +137,41 @@
 #          pooled reward-sweep optimum — same "don't carry the old value
 #          over" discipline as every prior threshold change.
 #
+# Entry 9 REAL LEADERBOARD RESULT (2026-07-25, submission 2257): AUROC
+#          0.651 -- EXACTLY FLAT vs. Entry 8's 0.651, not an improvement.
+#          Reward 0.115 -> 0.094, an 18.3% RELATIVE REGRESSION. This is
+#          the worst LOSO-to-leaderboard divergence this project has
+#          seen: LOSO/ratchet predicted improvement on BOTH metrics
+#          (+0.0091 AUROC, +8.9% reward) and got the reward direction
+#          wrong entirely, on the one axis every piece of evidence all
+#          session suggested had the most headroom.
+#
+#          REVERTED to exact Entry 8 config (this state) on the same
+#          date. Reasoning for reverting rather than diagnosing further
+#          in place: AUROC landing EXACTLY flat while reward dropped
+#          sharply is a specific signature — it means the model's
+#          RANKING of patients barely changed, but where the decision
+#          boundary landed did. That points more at the THRESHOLD change
+#          (0.10 -> 0.06, picked from the LOSO pooled sweep's own optimum)
+#          than at the Stage 2 / limb-enrichment feature changes
+#          themselves — a feature-driven regression would typically show
+#          up in AUROC too, even faintly. Not confirmed which of the two
+#          (threshold vs. features) actually caused the regression — this
+#          is a hypothesis based on the AUROC/reward pattern, not a
+#          diagnosed root cause. Reverting fully rather than isolating the
+#          threshold specifically, because the team is redirecting effort
+#          toward a different, AUROC-focused investigation (subtype-
+#          stratified performance, learning curve, non-linear-interaction
+#          probe — see learning_log.md, 2026-07-2x) rather than continuing
+#          to iterate on this feature-refinement branch. Do not re-ship
+#          Stage 2 or limb enrichment without first re-testing on a
+#          GENUINELY held-out site, not just LOSO rotation across the 3
+#          training sites — this entry is the second time (after Entry 6)
+#          that LOSO's predicted direction has failed to hold, now on
+#          reward specifically, previously on AUROC specifically. Treat
+#          LOSO as unreliable in both magnitude AND direction for both
+#          metrics going forward, not just magnitude.
+#
 # See features/FEATURES.md and LEARNING_LOG.md for full rationale.
 
 ################################################################################
@@ -159,8 +194,7 @@ from features.physiological_ratios import (extract_physiological_ratio_features,
 from features.human              import extract_human_annotations_features
 from features.pipeline           import build_logreg_pipeline
 from features.sample_weighting   import compute_value_weighted_sample_weights
-from features.feature_selection  import (FeatureDropper,
-                                          STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES)
+from features.feature_selection  import FeatureDropper, ENTRY8_EXACT_DROP_FEATURES
 from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
                       N_DEMOGRAPHIC_FEATURES, IDX_AGE)
 
@@ -185,7 +219,7 @@ _N_RATIO    = N_RATIO_FEATURES           # 15
 # t=0.08, because dropping features reshapes the calibrated output, not
 # just the ranking. See learning_log.md, 2026-07-20.
 #verified THRESHOLD
-THRESHOLD = 0.06
+THRESHOLD = 0.10
 
 # Entry 6 — value-weighted sample-weighting boost applied at .fit() time
 # (compute_value_weighted_sample_weights, features/sample_weighting.py).
@@ -305,10 +339,11 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
               f'({n_pos} positive, {n_neg} negative)...')
         print(f'Feature vector shape: {features.shape}')
 
-    # ── Model pipeline (Entry 9: logreg, C=0.001, value-weighted sample
-    #    weighting at alpha=1.0, calibrated, AgeResidualizer on, Stage 1 +
-    #    Stage 2 + dead-feature cleanup drops, limb enrichment features
-    #    kept) ──────────────────────────────────────────────────────────
+    # ── Model pipeline (Entry 8 config, RE-INSTATED after Entry 9's
+    #    revert — see header comment above for the real-leaderboard
+    #    numbers that motivated reverting: logreg, C=0.001, value-weighted
+    #    sample weighting at alpha=1.0, calibrated, AgeResidualizer on,
+    #    Stage 1 sign-flip features dropped) ─────────────────────────────
     # Built via features/pipeline.py's build_logreg_pipeline() — the same
     # shared definition loso_cv.py/reg_sweep.py uses, so the validation
     # harness and this submission can never silently diverge on what "the
@@ -321,13 +356,24 @@ def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
     # FeatureDropper (features/feature_selection.py) is inserted
     # immediately after 'age_residual' and before 'imputer' — it MUST sit
     # there, not earlier, so AgeResidualizer's own source features (e.g.
-    # CA_rate, used to compute CA_rate_age_residual — which IS dropped as
-    # of Entry 9, see feature_selection.py's Stage 2 rationale) are still
-    # present when AgeResidualizer runs. Do not reorder these steps.
+    # CA_rate, used to compute CA_rate_age_residual, which is KEPT here)
+    # are still present when AgeResidualizer runs, even though the raw
+    # CA_rate column itself is one of the dropped features. Do not reorder
+    # these steps.
+    #
+    # Uses ENTRY8_EXACT_DROP_FEATURES, not STAGE1_DROP_FEATURES alone —
+    # the raw vector is now permanently 51 columns (limb enrichment,
+    # 2026-07-20), 3 more than when Entry 8 shipped, and
+    # STAGE1_DROP_FEATURES has no way to know about those 3 since it
+    # predates them. ENTRY8_EXACT_DROP_FEATURES explicitly excludes them
+    # too, reproducing the true 39-feature Entry 8 config regardless of
+    # what's since been added to caisr_enriched.py. Verify feature count
+    # with a smoke test after ANY change here — this exact mismatch (42
+    # features instead of 39) was caught only by testing, not by reading
+    # the diff, when this revert was first written.
     _base_model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
     model = Pipeline(
-        [_base_model.steps[0],
-         ('feature_dropper', FeatureDropper(STAGE1_PLUS_STAGE2_PLUS_CLEANUP_DROP_FEATURES))]
+        [_base_model.steps[0], ('feature_dropper', FeatureDropper(ENTRY8_EXACT_DROP_FEATURES))]
         + _base_model.steps[1:]
     )
 
