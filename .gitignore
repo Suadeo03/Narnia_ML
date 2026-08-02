@@ -101,3 +101,21 @@ phase1_eda.py
 archive_outputs/
 eda/
 /tools
+
+# OSF fine-tune caches, embeddings & research bundles — large and fully
+# regenerable; NEVER commit these to the research repo. (Note: the SUBMISSION
+# weights models/osf_ft_best.pt + OSF-Base/osf_backbone.pth are ALSO ignored by
+# the *.pt/*.pth/models rules above — that is intentional here; on the
+# submission branch you force-add just those two files, see SUBMISSION_OSF_FT.md.)
+*.npy
+*.npz
+osf_*_bundle.zip
+osf_finetune_bundle.zip
+osf_stage_pooled_bundle.zip
+proximity_kaggle_bundle.zip
+osf_ft_cache*
+*_epochs.npy
+*_meta.npz
+osf_stage_large*
+osf_ft_best.zip
+osf_ft_last.zip

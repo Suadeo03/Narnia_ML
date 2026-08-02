@@ -1,484 +1,69 @@
 #!/usr/bin/env python
-
 # Team Narnia — PhysioNet Challenge 2026
-# Entry 3: Added Platt-scaled calibration (CalibratedClassifierCV) and
-#          explicit threshold (0.12, tuned via loso_cv.py pooled sweep)
-#          replacing model.predict()'s default 0.5 cutoff.
-# Entry 4: Added AgeResidualizer pipeline step (2 new features:
-#          CA_rate_age_residual, EEG_var_REM_Wake_age_residual). Both were
-#          previously written off as uninformative but age-residualized EDA
-#          (2026-07-02) showed real signal masked by an age confound. Fit at
-#          train time only, applied identically at inference — see
-#          features/age_residuals.py. Feature count: 48 -> 50.
-# Entry 4 (fix, 2026-07-03): moved model-pipeline construction (XGBoost
-#          params, calibration, AgeResidualizer wiring) out of this file and
-#          into features/pipeline.py's build_pipeline(), shared with
-#          loso_cv.py. This closes a real bug where loso_cv.py had its own
-#          hand-copied Pipeline() that silently never got the AgeResidualizer
-#          step added here — LOSO was validating a stale 48-feature model
-#          while this file had already moved to 50. See features/pipeline.py
-#          for the full incident writeup.
-# Entry 5 (2026-07-10): FIRST LARGE-TRAINING-SET SUBMISSION. Switched
-#          model_family from XGBoost to logistic regression
-#          (build_logreg_pipeline, features/pipeline.py). Evidence: on the
-#          large training set, logreg's mean age-conditioned AUROC (0.6002,
-#          both folds independently) beats every XGBoost/CatBoost variant
-#          tested (all clustered ~0.544), a real (2.36 sigma) effect, not
-#          noise — see learning_log.md, 2026-07-06/07 model-family
-#          diagnostic entries. Reward is unaffected either way (all model
-#          families land in the same 0.072-0.076 band at large scale) — this
-#          switch costs nothing on the metric that matters most and gains
-#          real ground on the metric that was weaker.
-#          THRESHOLD changed 0.12 -> 0.10 to match: logreg's own pooled
-#          threshold sweep picked a DIFFERENT optimum than XGBoost's — do
-#          not carry XGBoost's tuned value over by habit.
-#          xgboost stays in requirements.txt: features/pipeline.py still
-#          imports XGBClassifier unconditionally at module level (build_pipeline()
-#          still exists, just unused by this file now), so the dependency
-#          doesn't go away just because this file stopped calling it.
-#          CAVEAT: this is the first-ever large-set submission. Every number
-#          above is a LOSO estimate — zero large-set leaderboard data points
-#          exist yet to confirm the LOSO->leaderboard transfer at this scale.
-#          Treat this submission itself as the calibration point, not a
-#          confirmed result.
-# Entry 6 (2026-07-19): Two independently-validated, compounding levers on
-#          top of the Entry 5 logreg pipeline — branch (a) feature work
-#          (NF1/NF2, time-of-night) and the age-banded threshold both closed
-#          with null/falsified results and are NOT reopened here (see
-#          learning_log_3, 2026-07-16 entries).
-#          1. C changed 0.01 -> 0.001 (build_logreg_pipeline's C= arg):
-#             reward +35% relative at 3-site LOSO, AUROC flat. Reproduced
-#             exactly across two independent Kaggle runs.
-#          2. Value-weighted sample weighting added at .fit() time, alpha=1.0
-#             (compute_value_weighted_sample_weights, features/
-#             sample_weighting.py — promoted from tools/reg_sweep.py, same
-#             shared-module precedent as AgeResidualizer): additional +12.9%
-#             relative reward on top of #1, AUROC still flat (max 0.21σ
-#             across all 3 folds). Reproduced bit-for-bit on an independent
-#             Kaggle run. train_model() has no fold rotation, so the weights
-#             are computed on the full training set passed in — this is
-#             itself the leakage-safe usage (see that function's docstring).
-#          Combined: +52% relative reward vs. the original shipped Entry 5
-#          baseline (0.1354 vs. 0.089 at 3-site LOSO), AUROC flat throughout
-#          the entire chain (0.6449 -> 0.6485 -> 0.6459, all within noise).
-#          THRESHOLD changed 0.10 -> 0.08 to match the new probability
-#          distribution's own pooled threshold sweep optimum.
-# Entry 7 (2026-07-19, TESTED BUT NOT SHIPPED): MCI-targeted sample
-#          weighting (compute_mci_boosted_weights, features/subtype_
-#          weighting.py), beta_mci=0.75 layered on top of Entry 6's
-#          alpha=1.0. Validated on its own: +5.6% relative reward, S0001
-#          AUROC flat, MCI sensitivity 76.8% -> 85.9% (tools/ablation_mci_
-#          sample_weight.py). Deliberately held back from Entry 8 below —
-#          both changes touch the sample-weighting layer, and shipping
-#          them together would make it impossible to attribute any
-#          outcome to either one individually (the exact ambiguity that
-#          made Entry 6's own regression so hard to diagnose). beta_mci
-#          =0.75 was also tuned against the 50-feature model, not Entry
-#          8's 39-feature one — the value would need re-validating against
-#          the new feature set, not carried over unchanged. features/
-#          subtype_weighting.py remains in the repo, unused by this file,
-#          for exactly that future re-test. See learning_log.md, 2026-
-#          07-19/20.
-# Entry 8 (2026-07-20): drops 11 SIGN-FLIPPING features — coefficients
-#          that changed direction depending on which 2 of the 3 training
-#          sites fit the model (features/feature_selection.py,
-#          STAGE1_DROP_FEATURES) — direct, measured evidence of site-
-#          specific overfitting, from the cross-fold coefficient analysis.
-#          Validated via tools/ablation_drop_signflip_features.py "Stage
-#          1": +8.2% relative reward, mean age-conditioned AUROC 0.6459 ->
-#          0.6711, ALL THREE LOSO folds improved simultaneously (not a
-#          mixed result), cross-fold spread shrank 0.1264 -> 0.1145 (more
-#          STABLE, not just better on average — the specific signature
-#          this theory predicted). Reproduced bit-for-bit across an
-#          independent Kaggle kernel restart. THRESHOLD changed 0.08 ->
-#          0.10 to match this config's own pooled reward-sweep optimum
-#          (t=0.10 gave best reward 0.1434, vs. the prior t=0.08's 0.1325
-#          on the unchanged 50-feature model) — same "re-tune the
-#          threshold for the new probability distribution, don't carry
-#          the old value over" discipline as every prior threshold change.
-#          Stage 2 of that same ablation (also dropping CA_rate_age_
-#          residual and Race_Black/White/Asian) was tested and found to be
-#          a REAL but SUB-GATE improvement (+0.23 sigma on S0001 vs. live
-#          Entry 8, re-tested correctly against the actual shipped
-#          config — an earlier note here claimed it "cleared the gate
-#          outright," which was based on a stale, superseded baseline
-#          comparison and has been corrected) — deliberately NOT included
-#          here at Entry 8 time. CA_rate_age_residual carries its own
-#          Entry 4 validation history; the Race_* features carry real,
-#          documented demographic signal that coefficient instability
-#          alone doesn't invalidate. Both deserve separate, specific
-#          justification before being dropped — not bundled in just
-#          because Stage 1 worked. See features/feature_selection.py
-#          header and learning_log.md, 2026-07-20, for the full reasoning.
-# Entry 9 (2026-07-21): Stage 2 + dead-feature cleanup (Race_Other,
-#          Sex_Unk — constant zero across the entire training population)
-#          PLUS a new stage-conditional limb-movement enrichment
-#          (Limb_REM, Limb_NREM, Limb_REM_NREM_ratio — features/
-#          caisr_enriched.py, same pattern already proven for AHI in v1),
-#          tested TOGETHER as one combined candidate (tools/
-#          ablation_stage2_plus_limb.py), not stacked ad hoc. Neither
-#          change alone clears the 1.0-sigma research bar (Stage 2 alone:
-#          +0.23 sigma; limb alone: +0.19 sigma), and combined they still
-#          don't (+0.39 sigma) — but the combination is a real, if modest,
-#          improvement on BOTH metrics vs. Entry 8 (mean age-cond AUROC
-#          +0.0085, S0001 fold +0.0092, best reward +13.0% relative), and
-#          roughly additive (0.23+0.19=0.42 naive sum vs. 0.39 actual — no
-#          meaningful interaction between the two changes). The 1.0-sigma
-#          bar is a RESEARCH discipline for deciding whether to keep
-#          investing in a candidate, not the submission gate itself —
-#          ratchet_check.py's actual gate is a one-directional regression
-#          ratchet (only fails on getting WORSE beyond noise; any real
-#          improvement passes cleanly) — see ratchet_baselines.json's
-#          'entry8' baseline entry. All three new limb features and all
-#          four Stage-2-affected features were re-checked for cross-fold
-#          coefficient sign-consistency on this exact 36-feature combined
-#          config (not just in isolation) — all sign-consistent.
-#          THRESHOLD changed 0.10 -> 0.06 to match this config's own
-#          pooled reward-sweep optimum — same "don't carry the old value
-#          over" discipline as every prior threshold change.
+# OSF-MIL fine-tune SUBMISSION team_code (arm 3, 2026-08-01).
 #
-# Entry 9 REAL LEADERBOARD RESULT (2026-07-25, submission 2257): AUROC
-#          0.651 -- EXACTLY FLAT vs. Entry 8's 0.651, not an improvement.
-#          Reward 0.115 -> 0.094, an 18.3% RELATIVE REGRESSION. This is
-#          the worst LOSO-to-leaderboard divergence this project has
-#          seen: LOSO/ratchet predicted improvement on BOTH metrics
-#          (+0.0091 AUROC, +8.9% reward) and got the reward direction
-#          wrong entirely, on the one axis every piece of evidence all
-#          session suggested had the most headroom.
+# ⚠ This file was the Entry-8 logreg submission; it is now the OSF-MIL
+#   fine-tune submission. Entry 8 is preserved in git history (revert with
+#   `git checkout <entry8-commit-or-branch> -- team_code.py requirements.txt`).
+#   Entry 8 remains the banked standing submission and the fallback the
+#   test-set entry can always be chosen as — this OSF entry is a validation
+#   PROBE (best-of scoring: it cannot dislodge Entry 8).
 #
-#          REVERTED to exact Entry 8 config (this state) on the same
-#          date. Reasoning for reverting rather than diagnosing further
-#          in place: AUROC landing EXACTLY flat while reward dropped
-#          sharply is a specific signature — it means the model's
-#          RANKING of patients barely changed, but where the decision
-#          boundary landed did. That points more at the THRESHOLD change
-#          (0.10 -> 0.06, picked from the LOSO pooled sweep's own optimum)
-#          than at the Stage 2 / limb-enrichment feature changes
-#          themselves — a feature-driven regression would typically show
-#          up in AUROC too, even faintly. Not confirmed which of the two
-#          (threshold vs. features) actually caused the regression — this
-#          is a hypothesis based on the AUROC/reward pattern, not a
-#          diagnosed root cause. Reverting fully rather than isolating the
-#          threshold specifically, because the team is redirecting effort
-#          toward a different, AUROC-focused investigation (subtype-
-#          stratified performance, learning curve, non-linear-interaction
-#          probe — see learning_log.md, 2026-07-2x) rather than continuing
-#          to iterate on this feature-refinement branch. Do not re-ship
-#          Stage 2 or limb enrichment without first re-testing on a
-#          GENUINELY held-out site, not just LOSO rotation across the 3
-#          training sites — this entry is the second time (after Entry 6)
-#          that LOSO's predicted direction has failed to hold, now on
-#          reward specifically, previously on AUROC specifically. Treat
-#          LOSO as unreliable in both magnitude AND direction for both
-#          metrics going forward, not just magnitude.
+# THIN entry point: all model logic lives in features/osf_mil.py (single source
+# of truth shared with tools/finetune_osf_mil.py and tools/evaluate_osf_ft.py),
+# the same thin-team_code / referenced-feature-module structure Entry 8 used
+# with features/pipeline.py.
 #
-# See features/FEATURES.md and LEARNING_LOG.md for full rationale.
+# requirements.txt: UNCOMMENT the torch/einops lines for this submission.
+# Bundled artifacts expected in the Docker build context:
+#   OSF-Base/                    OSF code package (osf.backbone.vit1d_cls)
+#   OSF-Base/osf_backbone.pth    backbone init + pretrained weights (341 MB)
+#   models/osf_ft_best.pt        the fine-tuned checkpoint (341 MB)
+# Request GPU. Full assembly checklist: SUBMISSION_OSF_FT.md.
+#
+# Model shipped: conservative MIL fine-tune (last block + top-level norm +
+# gated-attention head). Clean full-negative held-out I0006 = 0.6910 (+0.0159
+# vs frozen Entry-8's 0.6751). The bundled checkpoint was trained on S0001+
+# I0002 with I0006 HELD OUT — a valid FIRST validation-probe lower bound;
+# re-fine-tune on all three sites for the entry you'd lock in for the test set.
+#
+# DECISIONS baked as defaults (see SUBMISSION_OSF_FT.md): ship-weights (no
+# in-harness fine-tune — verify the rules permit shipping trained weights);
+# THRESHOLD nominal (AUROC, the ranking metric that decides the winner, is
+# threshold-independent).
 
-################################################################################
-# Libraries
-################################################################################
-
-import joblib
-import numpy as np
 import os
-from tqdm import tqdm
+from features.osf_mil import (
+    package_checkpoint, load_osf_mil_model, run_osf_mil_record,
+)
 
-from helper_code import *
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_OSF_REPO   = os.environ.get('NARNIA_OSF_REPO', os.path.join(SCRIPT_DIR, 'OSF-Base'))
+_OSF_BB     = os.environ.get('NARNIA_OSF_BACKBONE', os.path.join(_OSF_REPO, 'osf_backbone.pth'))
+_FT_CKPT    = os.environ.get('NARNIA_OSF_FT', os.path.join(SCRIPT_DIR, 'models', 'osf_ft_best.pt'))
+_THRESHOLD  = float(os.environ.get('NARNIA_OSF_THRESHOLD', '0.5'))
+_MAX_EPOCHS = int(os.environ.get('NARNIA_OSF_MAX_EPOCHS', '128'))
+_UNFREEZE   = int(os.environ.get('NARNIA_OSF_UNFREEZE', '1'))
 
-# Feature modules
-from features.demographic        import extract_demographic_features
-from features.caisr_base         import extract_caisr_base_features
-from features.caisr_enriched     import extract_caisr_enriched_features
-from features.physiological_ratios import (extract_physiological_ratio_features,
-                                            N_RATIO_FEATURES)
-from features.human              import extract_human_annotations_features
-from features.pipeline           import build_logreg_pipeline
-from features.sample_weighting   import compute_value_weighted_sample_weights
-from features.feature_selection  import FeatureDropper, ENTRY8_EXACT_DROP_FEATURES
-from features import (N_CAISR_BASE_FEATURES, N_CAISR_ENRICHED_FEATURES,
-                      N_DEMOGRAPHIC_FEATURES, IDX_AGE)
 
-from sklearn.pipeline import Pipeline
-
-################################################################################
-# Configuration
-################################################################################
-
-SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CSV_PATH = os.path.join(SCRIPT_DIR, 'channel_table.csv')
-
-# Fallback sizes for missing files
-_N_BASE     = N_CAISR_BASE_FEATURES      # 12
-_N_ENRICHED = N_CAISR_ENRICHED_FEATURES  # 11
-_N_RATIO    = N_RATIO_FEATURES           # 15
-
-# Entry 8 — new pooled reward-sweep optimum for the 39-feature (Stage 1
-# sign-flip features dropped) probability distribution. Confirmed via
-# tools/ablation_drop_signflip_features.py: reward peaks at t=0.10
-# (0.1434) — a different optimum than the prior 50-feature model's
-# t=0.08, because dropping features reshapes the calibrated output, not
-# just the ranking. See learning_log.md, 2026-07-20.
-#verified THRESHOLD
-THRESHOLD = 0.10
-
-# Entry 6 — value-weighted sample-weighting boost applied at .fit() time
-# (compute_value_weighted_sample_weights, features/sample_weighting.py).
-# alpha=1.0 is the validated, reproduced value — do not change without a
-# new sweep + reproduction run, same discipline as C and THRESHOLD above.
-SAMPLE_WEIGHT_ALPHA = 1.0
-
-################################################################################
-# Required functions
-################################################################################
-
-def train_model(data_folder, model_folder, verbose, csv_path=DEFAULT_CSV_PATH):
+def train_model(data_folder, model_folder, verbose):
+    # Ship-weights: package the offline-fine-tuned checkpoint + serving config.
+    package_checkpoint(_FT_CKPT, model_folder, {
+        'osf_repo_path': _OSF_REPO, 'osf_backbone_pth': _OSF_BB,
+        'unfreeze_last_blocks': _UNFREEZE, 'threshold': _THRESHOLD,
+        'max_epochs': _MAX_EPOCHS,
+    })
     if verbose:
-        print('Finding the Challenge data...')
-
-    patient_data_file     = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-    patient_metadata_list = find_patients(patient_data_file)
-    num_records           = len(patient_metadata_list)
-
-    if num_records == 0:
-        raise FileNotFoundError('No data were provided.')
-
-    if verbose:
-        print('Extracting features and labels from the data...')
-
-    features = []
-    labels   = []
-
-    pbar = tqdm(range(num_records), desc='Extracting Features',
-                unit='record', disable=not verbose)
-    for i in pbar:
-        try:
-            record     = patient_metadata_list[i]
-            patient_id = record[HEADERS['bids_folder']]
-            site_id    = record[HEADERS['site_id']]
-            session_id = record[HEADERS['session_id']]
-
-            if verbose:
-                pbar.set_postfix({'patient': patient_id})
-
-            # ── Demographics ─────────────────────────────────────────────────
-            demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-            patient_data = load_demographics(demo_file, patient_id, session_id)
-            demo_f = extract_demographic_features(patient_data)
-
-            # ── Physiological EDF ─────────────────────────────────────────────
-            phys_file = os.path.join(
-                data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER,
-                site_id, f'{patient_id}_ses-{session_id}.edf')
-            if not os.path.exists(phys_file):
-                if verbose:
-                    tqdm.write(
-                        f'  ! Missing physiological EDF for {patient_id} — skipping.')
-                continue
-            phys_data, phys_fs = load_signal_data(phys_file)
-
-            # ── CAISR Annotations ─────────────────────────────────────────────
-            algo_file = os.path.join(
-                data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
-                site_id, f'{patient_id}_ses-{session_id}_caisr_annotations.edf')
-            if os.path.exists(algo_file):
-                algo_data, _ = load_signal_data(algo_file)
-                caisr_base     = extract_caisr_base_features(algo_data)
-                caisr_enriched = extract_caisr_enriched_features(algo_data)
-                # Ratio features require BOTH phys + CAISR
-                ratio_f = extract_physiological_ratio_features(
-                    phys_data, phys_fs, algo_data, csv_path=csv_path)
-            else:
-                tqdm.write(
-                    f'Error loading EDF file: [Errno 2] No such file or directory: '
-                    f"'{algo_file}'")
-                caisr_base     = np.full(_N_BASE,     float('nan'))
-                caisr_enriched = np.full(_N_ENRICHED, float('nan'))
-                ratio_f        = np.full(_N_RATIO,    float('nan'))
-
-            # ── Human Annotations (training only — not used in model) ─────────
-            human_file = os.path.join(
-                data_folder, HUMAN_ANNOTATIONS_SUBFOLDER,
-                site_id, f'{patient_id}_ses-{session_id}_expert_annotations.edf')
-            if os.path.exists(human_file):
-                human_data, _ = load_signal_data(human_file)
-                _ = extract_human_annotations_features(human_data)
-
-            # ── Label ─────────────────────────────────────────────────────────
-            label = load_diagnoses(
-                os.path.join(data_folder, DEMOGRAPHICS_FILE), patient_id)
-
-            if label == 0 or label == 1:
-                # 48-feature extraction vector. AgeResidualizer (pipeline
-                # step, Entry 4) appends the 2 age-residualized features
-                # at model.fit() time — do not hstack them here.
-                features.append(np.hstack([
-                    demo_f,
-                    caisr_base,
-                    caisr_enriched,
-                    ratio_f,
-                ]))
-                labels.append(label)
-
-            if 'phys_data'  in locals(): del phys_data
-            if 'algo_data'  in locals(): del algo_data
-            if 'human_data' in locals(): del human_data
-
-        except Exception as e:
-            tqdm.write(f'  !!! Error on record {i+1} ({patient_id}): {e}')
-            continue
-
-    pbar.close()
-
-    features = np.asarray(features, dtype=np.float32)
-    labels   = np.asarray(labels,   dtype=bool)
-
-    if verbose:
-        n_pos = int(labels.sum())
-        n_neg = int((~labels).sum())
-        print(f'Training on {len(labels)} patients '
-              f'({n_pos} positive, {n_neg} negative)...')
-        print(f'Feature vector shape: {features.shape}')
-
-    # ── Model pipeline (Entry 8 config, RE-INSTATED after Entry 9's
-    #    revert — see header comment above for the real-leaderboard
-    #    numbers that motivated reverting: logreg, C=0.001, value-weighted
-    #    sample weighting at alpha=1.0, calibrated, AgeResidualizer on,
-    #    Stage 1 sign-flip features dropped) ─────────────────────────────
-    # Built via features/pipeline.py's build_logreg_pipeline() — the same
-    # shared definition loso_cv.py/reg_sweep.py uses, so the validation
-    # harness and this submission can never silently diverge on what "the
-    # model" is (see features/pipeline.py header for the incident that
-    # motivated this discipline in the first place). C=0.001 and alpha=1.0
-    # are both independently reproduced on Kaggle (see learning_log_3,
-    # 2026-07-16 entries) — do not change either without a fresh
-    # reproduction run.
-    #
-    # FeatureDropper (features/feature_selection.py) is inserted
-    # immediately after 'age_residual' and before 'imputer' — it MUST sit
-    # there, not earlier, so AgeResidualizer's own source features (e.g.
-    # CA_rate, used to compute CA_rate_age_residual, which is KEPT here)
-    # are still present when AgeResidualizer runs, even though the raw
-    # CA_rate column itself is one of the dropped features. Do not reorder
-    # these steps.
-    #
-    # Uses ENTRY8_EXACT_DROP_FEATURES, not STAGE1_DROP_FEATURES alone —
-    # the raw vector is now permanently 51 columns (limb enrichment,
-    # 2026-07-20), 3 more than when Entry 8 shipped, and
-    # STAGE1_DROP_FEATURES has no way to know about those 3 since it
-    # predates them. ENTRY8_EXACT_DROP_FEATURES explicitly excludes them
-    # too, reproducing the true 39-feature Entry 8 config regardless of
-    # what's since been added to caisr_enriched.py. Verify feature count
-    # with a smoke test after ANY change here — this exact mismatch (42
-    # features instead of 39) was caught only by testing, not by reading
-    # the diff, when this revert was first written.
-    _base_model = build_logreg_pipeline(labels, calibrated=True, C=0.001)
-    model = Pipeline(
-        [_base_model.steps[0], ('feature_dropper', FeatureDropper(ENTRY8_EXACT_DROP_FEATURES))]
-        + _base_model.steps[1:]
-    )
-
-    # train_model() has no fold rotation — it trains once on whatever
-    # training set the organizers provide — so computing the weights on
-    # the full `labels`/age_train passed in here IS the leakage-safe usage
-    # (see compute_value_weighted_sample_weights' docstring for why this
-    # differs from reg_sweep.py's per-LOSO-fold call, which only ever sees
-    # that fold's training split).
-    age_train = features[:, IDX_AGE]
-    sample_weight = compute_value_weighted_sample_weights(
-        labels, age_train, alpha=SAMPLE_WEIGHT_ALPHA)
-
-    # 'classifier' is build_logreg_pipeline's final step name — sklearn's
-    # Pipeline routes fit_params via the 'stepname__paramname' convention.
-    # CalibratedClassifierCV.fit() accepts and forwards sample_weight to
-    # the wrapped LogisticRegression. (2026-07-16 incident: a leftover
-    # duplicate unweighted .fit() call was caught and removed during
-    # implementation on Kaggle — it would have silently discarded the
-    # weighting entirely with zero errors raised. There is only ONE .fit()
-    # call below; keep it that way.)
-    model.fit(features, labels, classifier__sample_weight=sample_weight)
-
-    os.makedirs(model_folder, exist_ok=True)
-    save_model(model_folder, model)
-
-    if verbose:
-        print('Done.')
-        print()
+        print(f'Packaged fine-tuned checkpoint into {model_folder} (ship-weights).')
 
 
 def load_model(model_folder, verbose):
-    return joblib.load(os.path.join(model_folder, 'model.sav'))
+    return load_osf_mil_model(model_folder, verbose=verbose)
 
 
 def run_model(model, record, data_folder, verbose):
-    model = model['model']
+    return run_osf_mil_record(model, record, data_folder, verbose=verbose)
 
-    patient_id = record[HEADERS['bids_folder']]
-    site_id    = record[HEADERS['site_id']]
-    session_id = record[HEADERS['session_id']]
-
-    # ── Demographics ──────────────────────────────────────────────────────────
-    demo_file    = os.path.join(data_folder, DEMOGRAPHICS_FILE)
-    patient_data = load_demographics(demo_file, patient_id, session_id)
-    demo_f = extract_demographic_features(patient_data)
-
-    # ── Physiological EDF ─────────────────────────────────────────────────────
-    phys_file = os.path.join(
-        data_folder, PHYSIOLOGICAL_DATA_SUBFOLDER,
-        site_id, f'{patient_id}_ses-{session_id}.edf')
-    phys_data = phys_fs = None
-    if os.path.exists(phys_file):
-        phys_data, phys_fs = load_signal_data(phys_file)
-
-    # ── CAISR Annotations ─────────────────────────────────────────────────────
-    algo_file = os.path.join(
-        data_folder, ALGORITHMIC_ANNOTATIONS_SUBFOLDER,
-        site_id, f'{patient_id}_ses-{session_id}_caisr_annotations.edf')
-    if os.path.exists(algo_file):
-        algo_data, _ = load_signal_data(algo_file)
-        caisr_base     = extract_caisr_base_features(algo_data)
-        caisr_enriched = extract_caisr_enriched_features(algo_data)
-        if phys_data is not None:
-            ratio_f = extract_physiological_ratio_features(
-                phys_data, phys_fs, algo_data)
-        else:
-            ratio_f = np.full(_N_RATIO, float('nan'))
-    else:
-        caisr_base     = np.full(_N_BASE,     float('nan'))
-        caisr_enriched = np.full(_N_ENRICHED, float('nan'))
-        ratio_f        = np.full(_N_RATIO,    float('nan'))
-
-    # NOTE: this is the 48-feature extraction vector (demo/base/enriched/
-    # ratios). The loaded `model` pipeline's age_residual step appends the
-    # 2 Entry 4 age-residualized features automatically — do not hstack
-    # them here, and do not hardcode 50 anywhere in this function.
-    features = np.hstack([
-        demo_f,
-        caisr_base,
-        caisr_enriched,
-        ratio_f,
-    ]).reshape(1, -1)
-
-    # ── Entry 8: calibrated probability + explicit threshold ──────────────────
-    # model.predict_proba() is already calibrated — calibration is baked into
-    # the pipeline itself (see train_model()). model.predict() is NOT used
-    # here: its default 0.5 cutoff is far too conservative for the reward
-    # metric at low local prevalence (this was Entry 1/2's mistake — reward
-    # 0.011 despite reasonable AUROC). THRESHOLD is set from tools/ablation_
-    # drop_signflip_features.py's pooled reward sweep for the 39-feature
-    # (Stage 1 dropped) probability distribution specifically (t=0.10) — not
-    # carried over from Entry 6's t=0.08, since dropping features reshapes
-    # the calibrated output, not just the ranking.
-    probability_output = model.predict_proba(features)[0][1]
-    binary_output       = int(probability_output > THRESHOLD)
-
-    return binary_output, probability_output
-
-
-################################################################################
-# Utilities
-################################################################################
 
 def save_model(model_folder, model):
-    joblib.dump({'model': model},
-                os.path.join(model_folder, 'model.sav'),
-                protocol=0)
+    pass  # train_model already writes osf_ft.pt + osf_ft_config.json

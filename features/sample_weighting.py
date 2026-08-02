@@ -84,3 +84,90 @@ def compute_value_weighted_sample_weights(y_train, age_train, alpha):
     pos_mask = (y_train == 1)
     weights[pos_mask] = 1.0 + alpha * value_norm[pos_mask]
     return weights
+
+
+# Candidate (2026-07-29): proximity-weighted positive boost. TESTED AND
+# CLOSED 2026-07-29 (thirteenth ceiling door) — no promote at beta 0.5/1.0/
+# 2.0 on the large set: I0002 negative and worsening with beta, effect
+# sub-noise (mean delta +0.0009/+0.0011/-0.0007 vs a ~0.005-0.007 floor).
+# See learning_log_4.md, 2026-07-29 (later) for the full result and the
+# explicit "benign mixed result, NOT the Entry 6/9 trap" reading (spread
+# SHRANK, S0001 improved every beta). Kept in-repo but DORMANT: imported
+# only by tools/ablation_proximity_weight.py, never by team_code.py, same
+# status HRV_ACTIVE_NAMES and SPECTRAL_ACTIVE_NAMES hold. Nothing to revert.
+# Do NOT wire into team_code.py — Entry 8 stands.
+#
+# Distinct MECHANISM from compute_value_weighted_sample_weights above:
+# that boosts positives by age-PREVALENCE (a reward-metric construct, and
+# empirically AUROC-FLAT — it shifts calibrated magnitude near the
+# boundary, not patient ranking). This boosts by DIAGNOSIS PROXIMITY (how
+# soon after the PSG the first qualifying ICD code landed), a label-timing
+# axis uncorrelated with the reward construct. Hypothesis: near-term
+# positives carry cleaner prodromal signal at PSG time, so concentrating
+# the fit on them changes the LEARNED DIRECTION -> changes ranking -> can
+# move age-conditioned AUROC (the metric that decides the Challenge),
+# unlike value-weighting or any threshold change. In-project prior: the
+# 2026-07-19 site-ranking-flip diagnostic (I0002's positives captured
+# ~345 days closer to diagnosis and it ranks best) is direct evidence the
+# axis is real. It is only a hypothesis about DIRECTION, not magnitude —
+# it may come back flat (joining value-weighting) or negative (if far-term
+# positives carry real signal that down-weighting discards, a genuine risk
+# at only ~500 positives). That is what the ablation is for.
+
+
+def compute_proximity_weighted_sample_weights(y_train, time_to_event_train, beta):
+    """
+    Per-training-sample weight array that boosts POSITIVE-class samples by
+    how soon their cognitive-impairment diagnosis followed the PSG. Layers
+    on top of class_weight='balanced' (LOGREG_PARAMS) exactly like
+    compute_value_weighted_sample_weights does, and is intended to COMPOSE
+    multiplicatively with it (sample_weight = value_weight * proximity_weight),
+    the same way sklearn already composes class_weight and sample_weight.
+
+    beta scales the boost. beta=0.0 returns all-ones — byte-identical to no
+    proximity weighting, so an un-set beta reproduces every prior result
+    exactly (same backward-compatible contract as alpha=0.0 above).
+
+    Weight assigned to positive i:  1.0 + beta * proximity_i,  where
+    proximity_i = (tte_max - tte_i) / (tte_max - tte_min)  in [0, 1]
+    (1.0 = soonest-diagnosed positive in this training set, 0.0 = latest).
+    Negatives — and any positive with a missing/NaN Time_to_Event, which
+    should not occur but is handled defensively — keep weight 1.0.
+
+    NOT LEAKAGE. Time_to_Event is derived from the future diagnosis date
+    and is correctly flagged pure-leakage AS A FEATURE (FEATURES.md — it
+    must never enter the extraction vector; the model never sees it at
+    inference). Used HERE it is a training-time SAMPLE WEIGHT only: it
+    governs how much each training row contributes to the fit, it is not
+    an input to prediction. This is the identical category to
+    compute_value_weighted_sample_weights reading y_train itself to build
+    its weights — allowed for the same reason.
+
+    LEAKAGE DISCIPLINE (mirrors value-weighting). The [tte_min, tte_max]
+    normalization reference is taken from the POSITIVES IN whatever
+    y_train/time_to_event_train is passed in — nothing else. At LOSO-
+    validation time that is this fold's TRAINING positives only, never the
+    held-out fold (the ablation tool passes only the training split's
+    Time_to_Event, exactly as reg_sweep.py passes only the training split
+    to value-weighting). At real submission time there is no fold rotation,
+    so the full training set is itself the correct, leakage-safe reference.
+    Never pass a held-out fold's Time_to_Event here.
+    """
+    y_train = np.asarray(y_train)
+    tte = np.asarray(time_to_event_train, dtype=float)
+
+    if beta == 0.0:
+        return np.ones(len(y_train))
+
+    weights = np.ones(len(y_train), dtype=float)
+    pos_mask = (y_train == 1) & np.isfinite(tte)
+    if pos_mask.sum() == 0:
+        return weights
+
+    pos_tte = tte[pos_mask]
+    lo, hi = pos_tte.min(), pos_tte.max()
+    # If every positive shares one Time_to_Event, there is nothing to
+    # differentiate — proximity collapses to 0 and all positives keep 1.0.
+    proximity = (hi - pos_tte) / (hi - lo + 1e-12)   # 1=soonest, 0=latest
+    weights[pos_mask] = 1.0 + beta * proximity
+    return weights
